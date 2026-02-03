@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: teachers_stat_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./exports:/app/exports
+      - ./storage:/app/storage
+    environment:
+      - TZ=Asia/Tashkent

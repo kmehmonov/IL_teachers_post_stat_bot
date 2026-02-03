@@ -1,0 +1,6 @@
+python-telegram-bot[job-queue,socks]>=20.0
+pandas
+openpyxl
+python-dotenv
+filelock
+pytz
