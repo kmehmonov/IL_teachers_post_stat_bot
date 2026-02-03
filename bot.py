@@ -9,7 +9,7 @@ from telegram.ext import (
     ConversationHandler
 )
 from config import BOT_TOKEN, PROXY_URL
-from handlers import tracking, admin
+from handlers import tracking, admin, registration
 
 # ============================================================================
 # LOGGING CONFIGURATION - STRICT: ONLY ADMIN ACTIONS AND ERRORS
@@ -78,6 +78,27 @@ def main():
     # ========================================================================
     # ADMIN CONVERSATION HANDLER (private chat only)
     # ========================================================================
+    # ========================================================================
+    # REGISTRATION CONVERSATION
+    # ========================================================================
+    registration_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(registration.start_registration, pattern="^start_registration$")],
+        states={
+            registration.WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, registration.handle_name_input)],
+        },
+        fallbacks=[CommandHandler("cancel", registration.cancel_registration)],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+    application.add_handler(registration_conv)
+    
+    # Global handler for Admin Actions (Approve/Reject)
+    application.add_handler(CallbackQueryHandler(registration.handle_registration_callback, pattern="^reg:"))
+
+    # ========================================================================
+    # ADMIN CONVERSATION HANDLER (private chat only)
+    # ========================================================================
     admin_conv = ConversationHandler(
         entry_points=[CommandHandler("start", admin.start, filters=filters.ChatType.PRIVATE)],
         states={
@@ -95,6 +116,9 @@ def main():
             admin.REPORT_GROUP_SELECT: [CallbackQueryHandler(admin.handle_callback)],
             admin.REPORT_GROUP_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin.handle_report_group_days)],
             admin.MYSTAT_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin.handle_mystat_days)],
+            admin.TEACHER_REPORT_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin.handle_teacher_report_days)],
+            admin.EDIT_GROUP_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin.handle_edit_group_title)],
+            admin.EDIT_TEACHER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin.handle_edit_teacher_name)],
         },
         fallbacks=[
             CommandHandler("cancel", admin.cancel),

@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
     EXCEL_DAYS,
     REPORT_GROUP_SELECT,
     REPORT_GROUP_DAYS,
-    MYSTAT_DAYS
-) = range(9)
+    MYSTAT_DAYS,
+    TEACHER_REPORT_DAYS,
+    EDIT_GROUP_TITLE,
+    EDIT_TEACHER_NAME
+) = range(12)
 
 def is_admin(user_id: int) -> bool:
     """Check if user is an admin."""
@@ -72,8 +75,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if teacher and teacher.get("active", True):
             return await teacher_menu(update, context, teacher_id, teacher)
     
-    # 3. Unauthorized
-    await update.message.reply_text("❌ You are not authorized to use this bot.")
+    # 3. Unauthorized / New User
+    if json_db.get_pending_registration(user_id):
+        await update.message.reply_text("⏳ Your registration request is pending approval.")
+        return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton("📝 Ro'yxatdan o'tish", callback_data="start_registration")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Assalomu alaykum!\n\n"
+        "Siz tizimda ro'yxatdan o'tmagansiz.\n"
+        "Botdan foydalanish uchun ro'yxatdan o'ting.",
+        reply_markup=reply_markup
+    )
     return ConversationHandler.END
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,18 +95,13 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🎮 *Admin Control Panel*\n\nChoose an action:"
     
     keyboard = [
-        [
-            InlineKeyboardButton("👨‍🏫 Teachers", callback_data="m:teachers"),
-            InlineKeyboardButton("➕ Add Teacher", callback_data="m:add_teacher")
-        ],
-        [
-            InlineKeyboardButton("🏫 Groups", callback_data="m:groups"),
-            InlineKeyboardButton("➕ Add Group", callback_data="m:add_group")
-        ],
+        [InlineKeyboardButton("👨‍🏫 Teachers", callback_data="m:teachers")],
+        [InlineKeyboardButton("🏫 Groups", callback_data="m:groups")],
         [
             InlineKeyboardButton("📊 Reports", callback_data="m:reports"),
             InlineKeyboardButton("📥 Excel", callback_data="m:excel")
         ],
+        [InlineKeyboardButton("⏳ Kutilayotgan so'rovlar", callback_data="m:pending")],
         [
             InlineKeyboardButton("📍 Report by Group", callback_data="m:report_by_group"),
             InlineKeyboardButton("🔍 Diagnostics", callback_data="m:diag")
@@ -169,6 +178,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await list_groups_for_report(update, context)
     elif data == "m:diag":
         return await show_diagnostics(update, context)
+    elif data == "m:pending":
+        return await show_pending_registrations(update, context)
     elif data == "m:mystat":
         await query.message.reply_text("📊 Enter number of days for your statistics (1-365):")
         return MYSTAT_DAYS
@@ -192,6 +203,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("📊 Enter number of days for report (1-365):")
         return REPORT_GROUP_DAYS
     
+    # Teacher groups
+    elif data.startswith("tg:"):
+        teacher_id = str(data[3:])
+        return await show_teacher_groups(update, context, teacher_id)
+        
+    # Teacher report
+    elif data.startswith("tr:"):
+        teacher_id = str(data[3:])
+        return await ask_teacher_report_days(update, context, teacher_id)
+
+    # Teacher edit name
+    elif data.startswith("te_n:"):
+        teacher_id = str(data[5:])
+        return await start_edit_teacher_name(update, context, teacher_id)
+
+
+    # Teacher delete confirm
+    elif data.startswith("td:"):
+        teacher_id = str(data[3:])
+        return await confirm_delete_teacher(update, context, teacher_id)
+        
+    # Teacher delete perform
+    elif data.startswith("tdc:"):
+        teacher_id = str(data[4:])
+        return await perform_delete_teacher(update, context, teacher_id)
+
+    # Show unassigned groups for adding (aa = add assignment)
+    elif data.startswith("aa:"):
+        teacher_id = str(data[3:])
+        return await show_unassigned_groups(update, context, teacher_id)
+    
     # Assignment toggle
     elif data.startswith("a:"):
         parts = data[2:].split("|")
@@ -202,8 +244,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Toggle group enabled
     elif data.startswith("ge:"):
         chat_id_str = data[3:]
-        return await toggle_group_enabled(update, context, chat_id_str)
+        # After toggling, return to settings
+        await toggle_group_enabled(update, context, chat_id_str)
+        return await show_group_settings(update, context, chat_id_str)
+
+    # Group settings menu
+    elif data.startswith("gs:"):
+        chat_id_str = data[3:]
+        return await show_group_settings(update, context, chat_id_str)
+
+    # Group delete confirm
+    elif data.startswith("gd:"):
+        chat_id_str = data[3:]
+        return await confirm_delete_group(update, context, chat_id_str)
+
+    # Group Edit title
+    elif data.startswith("ge_t:"):
+        chat_id_str = data[5:]
+        return await start_edit_group_title(update, context, chat_id_str)
+        
+    # Group delete perform
+    elif data.startswith("gdc:"):
+        chat_id_str = data[4:]
+        return await perform_delete_group(update, context, chat_id_str)
+    return MENU
+
+async def show_pending_registrations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pending registration requests."""
+    pending = json_db.load_pending_registrations()
     
+    if not pending:
+        await update.callback_query.message.reply_text("✅ No pending requests found.")
+        return await start(update, context)
+        
+    await update.callback_query.message.reply_text(f"⏳ Found {len(pending)} pending requests:")
+    
+    for telegram_id, data in pending.items():
+        name = data.get("full_name", "Unknown Request")
+        created = data.get("created_at", "")[:19]
+        
+        msg_text = (
+            f"🆕 *Pending Request*\n\n"
+            f"👤 Name: {name}\n"
+            f"🆔 Telegram ID: `{telegram_id}`\n"
+            f"📅 Time: {created}"
+        )
+        
+        # Reuse the 'reg:ap' and 'reg:rj' callback data format from registration.py
+        # It is handled globally in bot.py by handle_registration_callback
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"reg:ap:{telegram_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reg:rj:{telegram_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.message.reply_text(
+            msg_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
     return MENU
 
 # ============================================================================
@@ -278,50 +380,198 @@ async def show_teacher_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
     stats = json_db.get_teacher_stats_summary(teacher_id, days=7)
     groups = json_db.load_groups()
     
+    
     msg = f"👨‍🏫 *{teacher['full_name']}*\n"
     msg += f"ID: `{teacher_id}`\n"
     msg += f"Telegram ID: `{teacher['telegram_user_id']}`\n"
     msg += f"Status: {'✅ Active' if teacher.get('active', True) else '❌ Inactive'}\n\n"
+    msg += "Choose an action:"
     
-    msg += "📊 *Last 7 days:*\n"
-    if not stats["groups"]:
-        msg += "_No activity_\n"
-    else:
-        for chat_id, counters in stats["groups"].items():
-            g_title = groups.get(chat_id, {}).get("title", chat_id)
-            total = get_overall_total(counters)
-            msg += f"\n{format_entity_block(f'📍 {g_title} {total}', counters)}\n"
-        
-        total_all = get_overall_total(stats["total"])
-        msg += f"\n🏆 *{total_all}*\n"
-    
-    msg += "\n\n*Assign to Groups:*"
-    
-    # Show assignment toggles
-    keyboard = []
-    all_groups = json_db.load_groups()
-    assigned_groups = json_db.get_teacher_groups(teacher_id)
-    
-    for chat_id_str, g_data in sorted(all_groups.items(), key=lambda x: x[1]['title']):
-        is_assigned = chat_id_str in assigned_groups
-        status = "✅" if is_assigned else "❌"
-        # Callback data format: a:teacher_id|chat_id
-        keyboard.append([InlineKeyboardButton(
-            f"{status} {g_data['title'][:30]}",
-            callback_data=f"a:{teacher_id}|{chat_id_str}"
-        )])
-    
-    keyboard.append([InlineKeyboardButton("« Back to Teachers", callback_data="m:teachers")])
+    keyboard = [
+        [InlineKeyboardButton("🏫 Ustozning guruhlari", callback_data=f"tg:{teacher_id}")],
+        [InlineKeyboardButton("✏️ Ismni tahrirlash", callback_data=f"te_n:{teacher_id}")],
+        [InlineKeyboardButton("📊 Ustoz bo'yicha hisobot", callback_data=f"tr:{teacher_id}")],
+        [InlineKeyboardButton("❌ O'qituvchini o'chirish", callback_data=f"td:{teacher_id}")],
+        [InlineKeyboardButton("« Back to Teachers", callback_data="m:teachers")]
+    ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
     return MENU
 
+async def start_edit_teacher_name(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Ask for new teacher name."""
+    teacher = json_db.get_teacher(teacher_id)
+    if not teacher:
+        return await list_teachers(update, context)
+        
+    context.user_data['edit_teacher_id'] = teacher_id
+    
+    msg = (
+        f"✏️ *Edit Teacher Name*\n\n"
+        f"Current: `{teacher['full_name']}`\n\n"
+        "Please enter the new full name (F.I.SH):"
+    )
+    await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+    return EDIT_TEACHER_NAME
+
+async def handle_edit_teacher_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save new teacher name."""
+    if not update.message.text:
+        await update.message.reply_text("❌ Please enter text:")
+        return EDIT_TEACHER_NAME
+        
+    teacher_id = context.user_data.get('edit_teacher_id')
+    if not teacher_id:
+        return await start(update, context)
+        
+    new_name = update.message.text.strip()
+    json_db.update_teacher_name(teacher_id, new_name)
+    
+    await update.message.reply_text(f"✅ Teacher name updated to: **{new_name}**", parse_mode='Markdown')
+    return await start(update, context)
+
+async def confirm_delete_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Ask for confirmation before deleting a teacher."""
+    teacher = json_db.get_teacher(teacher_id)
+    if not teacher:
+        return await list_teachers(update, context)
+        
+    msg = (
+        f"⚠️ *DELETE TEACHER?*\n\n"
+        f"Are you sure you want to delete **{teacher['full_name']}**?\n"
+        f"This action cannot be undone."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🗑️ YES, DELETE", callback_data=f"tdc:{teacher_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"t:{teacher_id}")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    return MENU
+
+async def perform_delete_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Execute deletion."""
+    success, msg = json_db.delete_teacher(teacher_id)
+    if success:
+        await update.callback_query.answer(msg, show_alert=True)
+        return await list_teachers(update, context)
+    else:
+        await update.callback_query.answer(f"Error: {msg}", show_alert=True)
+        return await show_teacher_detail(update, context, teacher_id)
+
+async def show_teacher_groups(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Show groups assigned to a teacher."""
+    teacher = json_db.get_teacher(teacher_id)
+    if not teacher:
+        return await list_teachers(update, context)
+        
+    msg = f"🏫 *Groups for {teacher['full_name']}*\n\n"
+    msg += "*Assigned Groups:*"
+    
+    keyboard = []
+    all_groups = json_db.load_groups()
+    assigned_groups = json_db.get_teacher_groups(teacher_id)
+    
+    has_groups = False
+    if assigned_groups:
+        for chat_id_str in assigned_groups:
+            if chat_id_str in all_groups:
+                g_title = all_groups[chat_id_str]['title']
+                keyboard.append([InlineKeyboardButton(
+                    f"🏫 {g_title[:30]}",
+                    callback_data=f"a:{teacher_id}|{chat_id_str}"
+                )])
+                has_groups = True
+    
+    if not has_groups:
+        msg += "\n_No groups assigned_"
+
+    # Button to add other groups
+    keyboard.append([InlineKeyboardButton("➕ Assign to Group", callback_data=f"aa:{teacher_id}")])
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=f"t:{teacher_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    return MENU
+
+async def ask_teacher_report_days(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Ask for days for teacher report."""
+    teacher = json_db.get_teacher(teacher_id)
+    if not teacher:
+        return await list_teachers(update, context)
+        
+    context.user_data["report_teacher_id"] = teacher_id
+    
+    await update.callback_query.message.reply_text(
+        f"📊 Report for *{teacher['full_name']}*\n\n"
+        "Enter number of days (1-365):",
+        parse_mode='Markdown'
+    )
+    return TEACHER_REPORT_DAYS
+
+async def handle_teacher_report_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate report for specific teacher."""
+    if not update.message.text:
+        await update.message.reply_text("❌ Please enter a number:")
+        return TEACHER_REPORT_DAYS
+        
+    try:
+        days = int(update.message.text.strip())
+        if not (1 <= days <= 365):
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a number between 1 and 365:")
+        return TEACHER_REPORT_DAYS
+    
+    teacher_id = context.user_data.get("report_teacher_id")
+    if not teacher_id:
+        await update.message.reply_text("❌ Error: Teacher selection lost.")
+        return ConversationHandler.END
+        
+    # Reuse mystat logic but for admin
+    await generate_mystat_report(update, context, teacher_id, days)
+    await update.message.reply_text("\nUse /start to return to menu.")
+    return ConversationHandler.END
+
 async def toggle_assignment(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str, chat_id_str: str):
     """Toggle teacher assignment to a group."""
     success, message = json_db.toggle_assignment(teacher_id, chat_id_str)
+    
+    # Check if we were in "Add Group" mode or "Show Details" mode
+    # If we just added a group (message was "Include assignment"), we might want to return to detail or stay in add mode.
+    # But simplifies logic is just return to detail view which now shows the new group as assigned.
     await update.callback_query.answer(message)
     return await show_teacher_detail(update, context, teacher_id)
+
+async def show_unassigned_groups(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str):
+    """Show list of groups NOT assigned to the teacher."""
+    all_groups = json_db.load_groups()
+    assigned_groups = json_db.get_teacher_groups(teacher_id)
+    
+    msg = "➕ *Assign to New Group*\n\nSelect a group to add:"
+    keyboard = []
+    
+    # Filter only unassigned groups
+    unassigned = {k: v for k, v in all_groups.items() if k not in assigned_groups}
+    
+    if not unassigned:
+         msg = "✅ All registered groups are already assigned to this teacher."
+         keyboard.append([InlineKeyboardButton("« Back", callback_data=f"t:{teacher_id}")])
+    else:
+        for chat_id_str, g_data in sorted(unassigned.items(), key=lambda x: x[1]['title']):
+            # Callback uses same logic (toggle), so it will ADD it
+            keyboard.append([InlineKeyboardButton(
+                f"➕ {g_data['title'][:30]}",
+                callback_data=f"a:{teacher_id}|{chat_id_str}"
+            )])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data=f"t:{teacher_id}")])
+            
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    return MENU
 
 # ============================================================================
 # ADD TEACHER CONVERSATION
@@ -485,11 +735,98 @@ async def show_group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     msg += f"Created: {group.get('created_at', 'Unknown')[:10]}\n"
     
     keyboard = [
+        [InlineKeyboardButton("⚙️ Guruh sozlamasi", callback_data=f"gs:{chat_id_str}")],
+        [InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"ge_t:{chat_id_str}")],
+        [InlineKeyboardButton("📊 Guruh bo'yicha hisobot", callback_data=f"rg:{chat_id_str}")],
+        [InlineKeyboardButton("❌ Guruhni o'chirish", callback_data=f"gd:{chat_id_str}")],
+        [InlineKeyboardButton("« Back", callback_data="m:groups")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    return MENU
+
+async def start_edit_group_title(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
+    """Ask for new group title."""
+    group = json_db.get_group(chat_id_str)
+    if not group:
+         return await list_groups(update, context)
+
+    context.user_data['edit_group_id'] = chat_id_str
+    
+    msg = (
+        f"✏️ *Edit Group Title*\n\n"
+        f"Current Title: `{group['title']}`\n\n"
+        "Please enter the new title:"
+    )
+    await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+    return EDIT_GROUP_TITLE
+
+async def handle_edit_group_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save new group title."""
+    if not update.message.text:
+        await update.message.reply_text("❌ Please enter text:")
+        return EDIT_GROUP_TITLE
+        
+    chat_id_str = context.user_data.get('edit_group_id')
+    if not chat_id_str:
+        return await start(update, context)
+        
+    new_title = update.message.text.strip()
+    json_db.update_group_title(chat_id_str, new_title)
+    
+    await update.message.reply_text(f"✅ Group title updated to: **{new_title}**", parse_mode='Markdown')
+    
+    # Return to details (hacky way: simulate menu return or just end conv and let user navigate back)
+    # Better: show menu again
+    return await start(update, context)
+
+async def confirm_delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
+    """Ask for confirmation before deleting a group."""
+    group = json_db.get_group(chat_id_str)
+    if not group:
+        return await list_groups(update, context)
+        
+    msg = (
+        f"⚠️ *DELETE GROUP?*\n\n"
+        f"Are you sure you want to delete **{group['title']}**?\n"
+        f"This will stop tracking and remove all assignments."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🗑️ YES, DELETE", callback_data=f"gdc:{chat_id_str}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"g:{chat_id_str}")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    return MENU
+
+async def perform_delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
+    """Execute deletion."""
+    success, msg = json_db.delete_group(chat_id_str)
+    if success:
+        await update.callback_query.answer(msg, show_alert=True)
+        return await list_groups(update, context)
+    else:
+        await update.callback_query.answer(f"Error: {msg}", show_alert=True)
+        return await show_group_detail(update, context, chat_id_str)
+
+async def show_group_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
+    """Show group settings (enable/disable)."""
+    group = json_db.get_group(chat_id_str)
+    if not group:
+         return await list_groups(update, context)
+    
+    status = "✅ Enabled" if group.get("enabled", True) else "❌ Disabled"
+    msg = f"⚙️ *Settings for {group['title']}*\n\nCurrent Status: {status}\n"
+    
+    keyboard = [
         [InlineKeyboardButton(
-            "🔄 Toggle Enable/Disable",
+            f"🔄 {'Disable' if group.get('enabled', True) else 'Enable'}",
             callback_data=f"ge:{chat_id_str}"
         )],
-        [InlineKeyboardButton("« Back to Groups", callback_data="m:groups")]
+        [InlineKeyboardButton("« Back", callback_data=f"g:{chat_id_str}")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
