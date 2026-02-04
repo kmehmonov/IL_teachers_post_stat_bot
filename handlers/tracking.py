@@ -54,7 +54,7 @@ async def track_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if message.photo:
         msg_type = "photo"
-    elif message.video:
+    elif message.video or message.video_note:
         msg_type = "video"
     elif message.audio:
         msg_type = "audio"

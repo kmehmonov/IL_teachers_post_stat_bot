@@ -50,6 +50,13 @@ def format_entity_block(title_line: str, counters: dict) -> str:
     """Return title line + indented breakdown."""
     return f"{title_line}\n   {format_breakdown(counters)}"
 
+def format_short_name(full_name: str) -> str:
+    """Return First Last name only."""
+    parts = full_name.split()
+    if len(parts) >= 2:
+        return f"{parts[0]} {parts[1]}"
+    return full_name
+
 # ============================================================================
 # MAIN MENU
 # ============================================================================
@@ -102,10 +109,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📥 Excel", callback_data="m:excel")
         ],
         [InlineKeyboardButton("⏳ Kutilayotgan so'rovlar", callback_data="m:pending")],
-        [
-            InlineKeyboardButton("📍 Report by Group", callback_data="m:report_by_group"),
-            InlineKeyboardButton("🔍 Diagnostics", callback_data="m:diag")
-        ]
+        [InlineKeyboardButton(" Diagnostics", callback_data="m:diag")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -169,13 +173,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await start(update, context)
     elif data == "m:reports":
+        msg = "📊 *Select Report Type:*"
+        keyboard = [
+            [InlineKeyboardButton("Teachers Report", callback_data="r:t_simple")],
+            [InlineKeyboardButton("Teachers Detailed", callback_data="r:t_detail")],
+            [InlineKeyboardButton("Group Report", callback_data="r:g_simple")],
+            [InlineKeyboardButton("Groups Detailed", callback_data="r:g_detail")],
+            [InlineKeyboardButton("« Back", callback_data="m:back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+        return MENU
+        
+    elif data.startswith("r:"):
+        context.user_data["report_type"] = data[2:]
         await query.message.reply_text("📊 Enter number of days for report (1-365):")
         return REPORT_DAYS
     elif data == "m:excel":
         await query.message.reply_text("📥 Enter number of days for Excel export (1-365):")
         return EXCEL_DAYS
-    elif data == "m:report_by_group":
-        return await list_groups_for_report(update, context)
     elif data == "m:diag":
         return await show_diagnostics(update, context)
     elif data == "m:pending":
@@ -703,12 +719,13 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "No groups registered yet.\n\nUse *➕ Add Group* for instructions."
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="m:back")]]
     else:
-        msg = "🏫 *Groups:*\n\n"
+        msg = "🏫 Groups:\n\n"
         keyboard = []
         
         for chat_id_str, data in sorted(groups.items(), key=lambda x: x[1]['title']):
             status = "✅" if data.get("enabled", True) else "❌"
-            msg += f"{status} `{chat_id_str}` - {data['title']}\n"
+            # Removing markdown format to prevent errors with special chars in titles
+            msg += f"{status} {data['title']} (ID: {chat_id_str})\n"
             keyboard.append([InlineKeyboardButton(
                 f"{status} {data['title'][:30]}",
                 callback_data=f"g:{chat_id_str}"
@@ -717,7 +734,8 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="m:back")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+    # Removing parse_mode to be safe
+    await update.callback_query.edit_message_text(msg, reply_markup=reply_markup)
     return MENU
 
 async def show_group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
@@ -852,7 +870,7 @@ async def confirm_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Sender must be admin
     if not update.effective_user or not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Only bot admins can register groups!")
+        await update.message.reply_text(f"❌ Only bot admins can register groups!\nYour ID: `{update.effective_user.id}`")
         return
     
     # Bot must be admin in the group
@@ -905,79 +923,169 @@ async def handle_report_days(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Please enter a number between 1 and 365:")
         return REPORT_DAYS
     
-    await generate_text_report(update, context, days)
-    await update.message.reply_text("\nUse /start to return to menu.")
+    rtype = context.user_data.get("report_type", "t_simple")
+    
+    if rtype == "t_simple":
+        await gen_teachers_simple(update, context, days)
+    elif rtype == "t_detail":
+        await gen_teachers_detail(update, context, days)
+    elif rtype == "g_simple":
+        await gen_groups_simple(update, context, days)
+    elif rtype == "g_detail":
+        await gen_groups_detail(update, context, days)
+    else:
+        # Default
+        await gen_teachers_simple(update, context, days)
+        
+    await update.message.reply_text("Use /start to return to menu.")
     return ConversationHandler.END
 
-async def generate_text_report(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int):
-    """Generate text report."""
-    logger.info(f"ADMIN {update.effective_user.id} generated {days}-day report")
-    
+async def gen_teachers_simple(update, context, days):
+    """Teachers report: T/r | Name | XS"""
     stats = json_db.aggregate_stats(days)
     teachers = json_db.load_teachers()
+    
+    data_list = []
+    
+    for t_id, t_data in teachers.items():
+        if not t_data.get('active', True): continue
+        
+        total = 0
+        for chat_id in stats:
+            if t_id in stats[chat_id]:
+                total += get_overall_total(stats[chat_id][t_id])
+                
+        name = format_short_name(t_data['full_name'])
+        data_list.append((name, total))
+        
+    data_list.sort(key=lambda x: x[0])
+    
+    msg = f"📊 <b>Teachers Report (Last {days} days)</b>\n\n"
+    msg += "<pre>"
+    msg += "T/r |             FISH             | XS \n"
+    msg += "----+------------------------------+----\n"
+    
+    for i, (name, total) in enumerate(data_list, 1):
+        n_pad = name[:30].ljust(28)
+        msg += f"{i:<3} | {n_pad} | {total:>4}\n"
+    
+    msg += "</pre>"
+        
+    try:
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error sending report: {e}")
+        clean_msg = msg.replace("<pre>", "").replace("</pre>", "").replace("<b>", "").replace("</b>", "")
+        await update.message.reply_text(clean_msg)
+
+async def gen_teachers_detail(update, context, days):
+    """Teachers Detailed report."""
+    stats = json_db.aggregate_stats(days)
+    teachers = json_db.load_teachers()
+    
+    data_list = []
+    
+    for t_id, t_data in teachers.items():
+        if not t_data.get('active', True): continue
+        
+        agg_counters = {
+            "text": 0, "photo": 0, "video": 0,
+            "audio": 0, "voice": 0, "document": 0
+        }
+        
+        for chat_id in stats:
+            if t_id in stats[chat_id]:
+                for k, v in stats[chat_id][t_id].items():
+                    agg_counters[k] += v
+        
+        total = get_overall_total(agg_counters)
+        name = format_short_name(t_data['full_name'])
+        data_list.append((name, total, agg_counters))
+        
+    data_list.sort(key=lambda x: x[0])
+    
+    msg = f"📊 <b>Teachers Detailed Report (Last {days} days)</b>\n\n"
+    for i, (name, total, counters) in enumerate(data_list, 1):
+        msg += f"{i}. 👨‍🏫 <b>{name}</b> — {total}\n"
+        msg += f"   {format_breakdown(counters)}\n\n"
+        
+    try:
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except:
+        await update.message.reply_text(msg.replace('<b>','').replace('</b>',''))
+
+async def gen_groups_simple(update, context, days):
+    """Group report: T/r | GR name | XS"""
+    stats = json_db.aggregate_stats(days)
     groups = json_db.load_groups()
     
-    if not stats:
-        await update.message.reply_text(f"📊 No activity in the last {days} days.")
-        return
+    data_list = []
     
-    msg = f"📊 *Report: Last {days} Days*\n\n"
+    for g_id, g_data in groups.items():
+        if not g_data.get('enabled', True): continue
+        
+        total = 0
+        if g_id in stats:
+            for t_counters in stats[g_id].values():
+                total += get_overall_total(t_counters)
+                
+        title = g_data['title']
+        data_list.append((title, total))
+        
+    data_list.sort(key=lambda x: x[0])
     
-    # Calculate totals
-    teacher_totals = {}
-    group_totals = {}
+    msg = f"📊 <b>Groups Report (Last {days} days)</b>\n\n"
+    msg += "<pre>"
+    msg += "T/r |           GR name              | XS \n"
+    msg += "----+--------------------------------+----\n"
     
-    for chat_id, t_stats in stats.items():
-        g_title = groups.get(chat_id, {}).get("title", chat_id)
-        if chat_id not in group_totals:
-            group_totals[chat_id] = {
-                "title": g_title,
-                "counters": {"text": 0, "photo": 0, "video": 0, "audio": 0, "voice": 0, "document": 0}
-            }
-            
-        for t_id, counters in t_stats.items():
-            if t_id not in teacher_totals:
-                name = teachers.get(t_id, {}).get("full_name", t_id)
-                teacher_totals[t_id] = {
-                    "name": name,
-                    "counters": {"text": 0, "photo": 0, "video": 0, "audio": 0, "voice": 0, "document": 0}
-                }
-            
-            for key, val in counters.items():
-                if key in teacher_totals[t_id]["counters"]:
-                    teacher_totals[t_id]["counters"][key] += val
-                if key in group_totals[chat_id]["counters"]:
-                    group_totals[chat_id]["counters"][key] += val
+    for i, (title, total) in enumerate(data_list, 1):
+        t_pad = title[:30].ljust(30)
+        msg += f"{i:<3} | {t_pad} | {total:>4}\n"
     
-    # Top teachers
-    msg += "*🏆 Top Teachers:*\n"
-    sorted_teachers = sorted(
-        teacher_totals.items(), 
-        key=lambda x: get_overall_total(x[1]["counters"]), 
-        reverse=True
-    )[:10]
+    msg += "</pre>"
+        
+    try:
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except:
+        clean_msg = msg.replace("<pre>", "").replace("</pre>", "").replace("<b>", "").replace("</b>", "")
+        await update.message.reply_text(clean_msg)
+
+async def gen_groups_detail(update, context, days):
+    """Groups detailed report."""
+    stats = json_db.aggregate_stats(days)
+    groups = json_db.load_groups()
     
-    for i, (t_id, data) in enumerate(sorted_teachers, 1):
-        c = data["counters"]
-        total = get_overall_total(c)
-        label = f"👨‍🏫 {data['name']} — {total}"
-        msg += f"\n{i}. {format_entity_block(label, c)}\n"
+    data_list = []
     
-    # Groups
-    msg += "\n*📍 By Group:*\n"
-    sorted_groups = sorted(
-        group_totals.items(), 
-        key=lambda x: get_overall_total(x[1]["counters"]), 
-        reverse=True
-    )
+    for g_id, g_data in groups.items():
+        if not g_data.get('enabled', True): continue
+        
+        agg_counters = {
+            "text": 0, "photo": 0, "video": 0,
+            "audio": 0, "voice": 0, "document": 0
+        }
+        
+        if g_id in stats:
+            for t_counters in stats[g_id].values():
+                for k, v in t_counters.items():
+                    agg_counters[k] += v
+                    
+        total = get_overall_total(agg_counters)
+        title = g_data['title']
+        data_list.append((title, total, agg_counters))
+        
+    data_list.sort(key=lambda x: x[0])
     
-    for chat_id, data in sorted_groups:
-        c = data["counters"]
-        total = get_overall_total(c)
-        label = f"📍 {data['title']} {total}"
-        msg += f"\n{format_entity_block(label, c)}\n"
-    
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    msg = f"📊 <b>Groups Detailed Report (Last {days} days)</b>\n\n"
+    for i, (title, total, counters) in enumerate(data_list, 1):
+        msg += f"{i}. <b>{title}</b> - {total}\n"
+        msg += f"   {format_breakdown(counters)}\n\n"
+        
+    try:
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except:
+        await update.message.reply_text(msg.replace('<b>','').replace('</b>',''))
 
 async def handle_report_group_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle report group days input."""
@@ -999,7 +1107,7 @@ async def handle_report_group_days(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
         
     await generate_group_report(update, context, chat_id_str, days)
-    await update.message.reply_text("\nUse /start to return to menu.")
+    await update.message.reply_text("Use /start to return to menu.")
     return ConversationHandler.END
 
 async def generate_group_report(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, days: int):

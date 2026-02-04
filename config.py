@@ -5,6 +5,10 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+print(f"DEBUG: Loaded ADMIN_IDS: {ADMIN_IDS}")
+# Also import logging here to log it properly if needed, but print should show in docker logs
+import logging
+logging.getLogger("config").info(f"Loaded ADMIN_IDS: {ADMIN_IDS}")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 EXPORT_DIR = os.getenv("EXPORT_DIR", "./exports")
 TZ = os.getenv("TZ", "Asia/Tashkent")
