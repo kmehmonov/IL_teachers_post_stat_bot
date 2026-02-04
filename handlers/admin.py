@@ -1377,43 +1377,57 @@ async def handle_mystat_days(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
         
     await generate_mystat_report(update, context, teacher_id, days)
-    await update.message.reply_text("\nUse /start to return to menu.")
-    return ConversationHandler.END
+    
+    # Show menu again
+    teacher = json_db.get_teacher(teacher_id)
+    return await teacher_menu(update, context, teacher_id, teacher)
 
 async def generate_mystat_report(update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_id: str, days: int):
     """Generate statistic report for a specific teacher."""
     logger.info(f"TEACHER {teacher_id} generated self-stat report for {days} days")
     
     stats = json_db.aggregate_stats(days)
-    groups = json_db.load_groups()
+    all_groups = json_db.load_groups()
+    # Get ALL assigned groups even if no stats
+    assigned_groups_ids = json_db.get_teacher_groups(teacher_id)
     
-    msg = "📊 *My Statistics*\n"
-    msg += f"📅 *Period:* Last {days} days\n\n"
-    msg += "📍 *By Group:*\n\n"
+    msg = f"📊 <b>My Statistics</b>\n"
+    msg += f"📅 <b>Period:</b> Last {days} days\n\n"
+    msg += "<b>By Group:</b>\n\n"
     
     overall_total = 0
-    has_activity = False
     
-    # Filter stats for this teacher
-    teacher_stats_by_group = {}
-    for chat_id_str, t_stats in stats.items():
-        if teacher_id in t_stats:
-            teacher_stats_by_group[chat_id_str] = t_stats[teacher_id]
+    # Sort assigned groups by title
+    groups_list = []
+    for chat_id_str in assigned_groups_ids:
+        title = all_groups.get(chat_id_str, {}).get("title", f"Group {chat_id_str}")
+        groups_list.append((chat_id_str, title))
+        
+    groups_list.sort(key=lambda x: x[1])
+    
+    if not groups_list:
+        msg += "⚠️ No groups assigned."
+    else:
+        for i, (chat_id_str, title) in enumerate(groups_list, 1):
+            counters = {
+                "text": 0, "photo": 0, "video": 0,
+                "audio": 0, "voice": 0, "document": 0
+            }
             
-    for chat_id_str, counters in teacher_stats_by_group.items():
-        group_title = groups.get(chat_id_str, {}).get("title", chat_id_str)
-        total = get_overall_total(counters)
-        if total == 0:
-            continue
+            if chat_id_str in stats and teacher_id in stats[chat_id_str]:
+                for k, v in stats[chat_id_str][teacher_id].items():
+                    counters[k] += v
             
-        has_activity = True
-        overall_total += total
-        
-        msg += f"\n{format_entity_block(f'📍 {group_title} {total}', counters)}\n"
-        
-    if not has_activity:
-        await update.message.reply_text(f"📊 No activity found for the last {days} days.")
-        return
-        
-    msg += f"\n🏆 *{overall_total}*"
-    await update.message.reply_text(msg, parse_mode='Markdown')
+            total = get_overall_total(counters)
+            overall_total += total
+            
+            msg += f"{i}. <b>{title}</b> — {total}\n"
+            msg += f"   {format_breakdown(counters)}\n\n"
+            
+    msg += f"\n🏆 <b>Total: {overall_total}</b>"
+    
+    try:
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error sending mystat: {e}")
+        await update.message.reply_text(msg.replace('<b>','').replace('</b>',''))
